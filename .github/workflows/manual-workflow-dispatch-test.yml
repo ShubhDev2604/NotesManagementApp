@@ -1,0 +1,109 @@
+name: Manual workflow_dispatch test
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_host:
+        description: "Base URL for your app/API (example: https://example.com)"
+        required: true
+        type: string
+      endpoint:
+        description: "Optional endpoint path (example: /api/test). Leave blank to skip POST."
+        required: false
+        default: ""
+        type: string
+      json_inline:
+        description: "Optional JSON payload to send/validate (paste JSON here)."
+        required: false
+        default: ""
+        type: string
+      json_file:
+        description: "Optional path to a JSON file in the repo (example: android-app/sample.json)."
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  dispatch-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (only needed if using json_file)
+        uses: actions/checkout@v4
+
+      - name: Show inputs (safe)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "app_host: ${{ inputs.app_host }}"
+          echo "endpoint: ${{ inputs.endpoint }}"
+          echo "json_inline_length: ${#JSON_INLINE}"
+          echo "json_file: ${{ inputs.json_file }}"
+        env:
+          JSON_INLINE: ${{ inputs.json_inline }}
+
+      - name: Determine payload source
+        id: payload
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          json_inline='${{ inputs.json_inline }}'
+          json_file='${{ inputs.json_file }}'
+
+          if [[ -n "$json_inline" && -n "$json_file" ]]; then
+            echo "Provide either json_inline OR json_file, not both." >&2
+            exit 1
+          fi
+
+          if [[ -n "$json_file" ]]; then
+            if [[ ! -f "$json_file" ]]; then
+              echo "json_file not found: $json_file" >&2
+              exit 1
+            fi
+            payload="$(cat "$json_file")"
+            echo "source=json_file" >> "$GITHUB_OUTPUT"
+          else
+            payload="$json_inline"
+            echo "source=json_inline" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Write payload to a file for later steps (even if empty)
+          printf '%s' "$payload" > payload.json
+          echo "payload_path=payload.json" >> "$GITHUB_OUTPUT"
+
+      - name: Validate JSON (if provided)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -s "${{ steps.payload.outputs.payload_path }}" ]]; then
+            echo "No JSON provided; skipping validation."
+            exit 0
+          fi
+          jq -e . "${{ steps.payload.outputs.payload_path }}" > /dev/null
+          echo "JSON is valid."
+
+      - name: POST payload (only if endpoint provided)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ inputs.endpoint }}" ]]; then
+            echo "No endpoint provided; skipping POST."
+            exit 0
+          fi
+
+          url="${{ inputs.app_host }}${{ inputs.endpoint }}"
+          echo "POST $url"
+
+          if [[ ! -s "${{ steps.payload.outputs.payload_path }}" ]]; then
+            echo "No JSON payload to send; skipping POST."
+            exit 0
+          fi
+
+          curl -sS -X POST "$url" \
+            -H "Content-Type: application/json" \
+            --data-binary @"${{ steps.payload.outputs.payload_path }}" \
+            -o response.txt \
+            -w "\nHTTP_STATUS=%{http_code}\n"
+
+          echo "---- response (first 2000 chars) ----"
+          head -c 2000 response.txt || true
